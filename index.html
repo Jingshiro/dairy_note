@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ta的日记本</title>
+    <link rel="icon" type="image/svg+xml" href="./icon.svg">
+    <!-- 引入 MQTT.js 库用于双向通信 -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <!-- 引入 crypto-js 用于 AES 加解密 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <!-- 引入 marked 用于把 Markdown 转为 HTML -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        :root {
+            /* 配色：米白 + 豆绿 */
+            --bg-color: #f7f6f0;               /* 底色/米白 */
+            --clay-bg: #fdfdf9;                /* 卡片背景 */
+            --accent-green: #bacbb2;           /* 豆绿主色 */
+            --text-dark: #4a5c4e;              /* 文字深色 */
+            --text-light: #7b8e7f;             /* 文字浅色 */
+            --clay-shadow-outer: 8px 8px 16px rgba(175, 185, 172, 0.3), -8px -8px 16px rgba(255, 255, 255, 0.8);
+            --clay-shadow-inner: inset 4px 4px 8px rgba(255, 255, 255, 0.9), inset -4px -4px 8px rgba(186, 203, 178, 0.2);
+            --clay-green-outer: 6px 6px 12px rgba(150, 168, 142, 0.4), -6px -6px 12px rgba(255, 255, 255, 0.7);
+            --clay-green-inner: inset 2px 2px 5px rgba(255, 255, 255, 0.5), inset -2px -2px 5px rgba(0, 0, 0, 0.05);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            scroll-behavior: smooth;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-dark);
+            line-height: 1.6;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            padding: 2rem 1rem;
+        }
+
+        .layout-wrapper {
+            display: flex;
+            width: 100%;
+            max-width: 1000px; /* 增加宽度以容纳侧边栏 */
+            gap: 2rem;
+            position: relative;
+        }
+
+        /* 侧边目录栏 */
+        aside.sidebar {
+            width: 200px;
+            flex-shrink: 0;
+            display: none; /* 移动端默认隐藏 */
+        }
+
+        @media (min-width: 768px) {
+            aside.sidebar {
+                display: block;
+            }
+        }
+
+        .sticky-wrapper {
+            position: sticky;
+            top: 2rem;
+            background: var(--clay-bg);
+            border-radius: 20px;
+            padding: 1.5rem;
+            box-shadow: var(--clay-shadow-outer), var(--clay-shadow-inner);
+            border: 2px solid rgba(255, 255, 255, 0.5);
+            max-height: calc(100vh - 4rem);
+            overflow-y: auto;
+        }
+
+        /* 隐藏滚动条 */
+        .sticky-wrapper::-webkit-scrollbar {
+            width: 0px;
+            background: transparent;
+        }
+
+        .sidebar-title {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: var(--accent-green);
+            margin-bottom: 1rem;
+            text-align: center;
+            border-bottom: 2px dashed rgba(186, 203, 178, 0.3);
+            padding-bottom: 0.5rem;
+        }
+
+        .month-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 0.8rem;
+        }
+
+        .month-list li a {
+            text-decoration: none;
+            color: var(--text-dark);
+            font-weight: 600;
+            display: block;
+            padding: 8px 12px;
+            border-radius: 12px;
+            text-align: center;
+            transition: all 0.2s;
+        }
+
+        .month-list li a:hover {
+            color: var(--accent-green);
+            background: rgba(186, 203, 178, 0.15);
+            transform: translateX(5px);
+        }
+
+        /* 主体内容区 */
+        .container {
+            flex-grow: 1;
+            min-width: 0; /* 防止内容撑破 flex 容器 */
+        }
+
+        /* 头部状态与标题 */
+        header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            color: var(--text-dark);
+            margin-bottom: 0.5rem;
+            text-shadow: 2px 2px 4px rgba(175, 185, 172, 0.2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 16px;
+            background: var(--clay-bg);
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: bold;
+            color: var(--text-light);
+            box-shadow: var(--clay-shadow-outer), var(--clay-shadow-inner);
+            transition: all 0.3s ease;
+        }
+
+        .status-badge.connected {
+            color: var(--accent-green);
+        }
+
+        .status-badge.error {
+            color: #d88b8b;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: currentColor;
+            margin-right: 8px;
+            box-shadow: inset 1px 1px 2px rgba(255,255,255,0.8), inset -1px -1px 2px rgba(0,0,0,0.1);
+        }
+
+        /* 核心内容区 */
+        main {
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        /* 加载动画或空状态 */
+        .loading {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-light);
+            font-size: 1.2rem;
+        }
+
+        /* 月份标题分割 */
+        .month-divider {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: var(--text-light);
+            text-align: center;
+            margin: 2rem 0 1rem 0;
+            position: relative;
+        }
+        .month-divider::before,
+        .month-divider::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            width: 30%;
+            height: 2px;
+            background: rgba(186, 203, 178, 0.3);
+        }
+        .month-divider::before {
+            left: 0;
+        }
+        .month-divider::after {
+            right: 0;
+        }
+
+        /* 博客风格的日记卡片 */
+        .diary-card {
+            background: var(--clay-bg);
+            border-radius: 30px;
+            padding: 2rem 2.5rem;
+            box-shadow: var(--clay-shadow-outer), var(--clay-shadow-inner);
+            border: 2px solid rgba(255, 255, 255, 0.5);
+            transition: transform 0.2s ease, box-shadow 0.2s ease, max-height 0.4s ease;
+            position: relative;
+            overflow: hidden;
+            scroll-margin-top: 2rem; /* 跳转时的顶部留白 */
+        }
+
+        .diary-card.collapsed .diary-content-wrapper {
+            max-height: 0;
+            opacity: 0;
+            margin-top: 0;
+            pointer-events: none;
+        }
+
+        .diary-card .diary-content-wrapper {
+            max-height: 2000px; /* 足够大的预设高度用于动画展开 */
+            opacity: 1;
+            margin-top: 1rem;
+            transition: max-height 0.4s ease, opacity 0.4s ease, margin-top 0.4s ease;
+        }
+
+        .diary-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer; /* 整行可点以展开收起 */
+            user-select: none;
+        }
+
+        /* 展开/收起的小箭头 */
+        .toggle-icon {
+            color: var(--accent-green);
+            transition: transform 0.3s ease;
+            margin-right: 15px;
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .diary-card.collapsed .toggle-icon {
+            transform: rotate(-90deg);
+        }
+
+        .diary-title-container {
+            display: flex;
+            align-items: center;
+        }
+
+        .diary-date {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--accent-green);
+            text-shadow: 1px 1px 0px rgba(255,255,255,0.8);
+        }
+
+        /* 只有展开状态下才显示分割线 */
+        .diary-card:not(.collapsed) .diary-header {
+            margin-bottom: 1rem;
+            padding-bottom: 1rem;
+            border-bottom: 2px dashed rgba(186, 203, 178, 0.3);
+        }
+
+        .diary-actions {
+            display: flex;
+            align-items: center;
+        }
+
+        /* 防止按钮的点击事件冒泡让卡片本身触发展开收起 */
+        .diary-actions button {
+            background: var(--accent-green);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 16px;
+            cursor: pointer;
+            font-weight: 600;
+            box-shadow: var(--clay-green-outer), var(--clay-green-inner);
+            transition: all 0.2s;
+            margin-left: 10px;
+        }
+
+        .diary-actions button:hover {
+            transform: scale(1.05);
+        }
+
+        .diary-actions button:active {
+            box-shadow: inset 4px 4px 8px rgba(0,0,0,0.1), inset -4px -4px 8px rgba(255,255,255,0.4);
+            transform: scale(0.95);
+        }
+
+        .diary-actions button.delete-btn {
+            background: #e2a0a0;
+            box-shadow: 6px 6px 12px rgba(226, 160, 160, 0.4), -6px -6px 12px rgba(255, 255, 255, 0.8), inset 2px 2px 5px rgba(255, 255, 255, 0.5), inset -2px -2px 5px rgba(0, 0, 0, 0.05);
+        }
+
+        /* Markdown 内容排版 */
+        .diary-content {
+            font-size: 1.1rem;
+            color: var(--text-dark);
+        }
+
+        .diary-content p {
+            margin-bottom: 1rem;
+        }
+
+        /* 强调重要事情 */
+        .diary-content strong {
+            color: #d1825c;
+            background: rgba(209, 130, 92, 0.1);
+            padding: 0 4px;
+            border-radius: 4px;
+        }
+
+        /* 阴暗想法 */
+        .diary-content em {
+            color: #6a6a6a;
+            font-style: italic;
+            font-family: serif;
+        }
+
+        /* 羞耻内容 */
+        .diary-content del {
+            color: #a0a0a0;
+            text-decoration: line-through 2px solid rgba(0,0,0,0.3);
+        }
+
+        /* 新增日记按钮浮动到底部右侧 */
+        #refreshBtn {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background: var(--accent-green);
+            color: white;
+            border: none;
+            box-shadow: var(--clay-green-outer), var(--clay-green-inner);
+            font-size: 1.5rem;
+            cursor: pointer;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transition: all 0.3s;
+            z-index: 100;
+        }
+
+        #refreshBtn:hover {
+            transform: translateY(-5px);
+        }
+
+        #refreshBtn:active {
+            box-shadow: inset 4px 4px 8px rgba(0,0,0,0.1), inset -4px -4px 8px rgba(255,255,255,0.4);
+            transform: translateY(0);
+        }
+    </style>
+</head>
+<body>
+
+<div class="layout-wrapper">
+    <!-- 侧边目录栏 -->
+    <aside class="sidebar">
+        <div class="sticky-wrapper">
+            <div class="sidebar-title">时间轴</div>
+            <ul class="month-list" id="monthList">
+                <!-- 目录由 JS 动态生成 -->
+            </ul>
+        </div>
+    </aside>
+
+    <div class="container">
+        <header>
+            <h1>
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: bottom; margin-right: 8px; color: var(--accent-green);">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                </svg>Ta的日记本
+            </h1>
+            <div class="status-badge" id="statusBadge">
+                <span class="status-dot"></span>
+                <span id="statusText">等待连接信道...</span>
+            </div>
+        </header>
+
+        <main id="diaryList">
+            <div class="loading">正在从宇宙信道获取加密数据，请稍候...</div>
+        </main>
+    </div>
+</div>
+
+<button id="refreshBtn" title="刷新数据">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="23 4 23 10 17 10"></polyline>
+        <polyline points="1 20 1 14 7 14"></polyline>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+    </svg>
+</button>
+
+<script>
+    // -------------------------
+    // 核心逻辑：加解密与 MQTT 通信
+    // -------------------------
+    
+    const hashParams = new URLSearchParams(window.location.hash.slice(1));
+    const channelId = hashParams.get('channel');
+    const secretKey = hashParams.get('key');
+
+    const statusBadge = document.getElementById('statusBadge');
+    const statusText = document.getElementById('statusText');
+    const diaryList = document.getElementById('diaryList');
+    const monthList = document.getElementById('monthList');
+
+    let mqttClient = null;
+    let diariesData = [];
+
+    const cryptoHelper = {
+        decrypt: (cipherText) => {
+            try {
+                const bytes = CryptoJS.AES.decrypt(cipherText, secretKey);
+                return JSON.parse(bytes.toString(CryptoJS.enc.Utf8));
+            } catch (e) {
+                console.error("解密失败", e);
+                return null;
+            }
+        },
+        encrypt: (dataObj) => {
+            return CryptoJS.AES.encrypt(JSON.stringify(dataObj), secretKey).toString();
+        }
+    };
+
+    function updateStatus(state, msg) {
+        statusBadge.className = `status-badge ${state}`;
+        statusText.innerText = msg;
+    }
+
+    // 切换卡片展开/收起状态
+    window.toggleDiary = function(elemId) {
+        const card = document.getElementById(elemId);
+        if (card.classList.contains('collapsed')) {
+            card.classList.remove('collapsed');
+        } else {
+            card.classList.add('collapsed');
+        }
+    }
+
+    // 渲染日记列表和侧边栏
+    function renderDiaries() {
+        if (diariesData.length === 0) {
+            diaryList.innerHTML = `<div class="loading">目前还没有任何日记哦~</div>`;
+            monthList.innerHTML = '';
+            return;
+        }
+
+        diaryList.innerHTML = '';
+        monthList.innerHTML = '';
+        
+        // 按照日期倒序排列
+        diariesData.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+        let currentMonth = "";
+        let monthSet = new Set();
+
+        diariesData.forEach((diary, index) => {
+            // 获取 YYYY-MM 格式
+            const diaryMonth = diary.date.substring(0, 7);
+            
+            // 如果遇到新月份，且不是第一个，就插入月份分割线，并在侧边栏增加条目
+            if (diaryMonth !== currentMonth) {
+                currentMonth = diaryMonth;
+                if (!monthSet.has(currentMonth)) {
+                    monthSet.add(currentMonth);
+                    
+                    // 主区域增加月份分割线
+                    const divider = document.createElement('div');
+                    divider.className = 'month-divider';
+                    divider.id = `month-${currentMonth}`;
+                    divider.innerText = currentMonth;
+                    diaryList.appendChild(divider);
+
+                    // 侧边栏增加快速跳转链接
+                    const li = document.createElement('li');
+                    li.innerHTML = `<a href="#month-${currentMonth}">${currentMonth}</a>`;
+                    monthList.appendChild(li);
+                }
+            }
+
+            const cardId = `diary-card-${index}`;
+            const card = document.createElement('article');
+            card.className = 'diary-card collapsed'; // 默认收起
+            card.id = cardId;
+            
+            // 使用 marked 将 Markdown 转 HTML
+            const htmlContent = marked.parse(diary.content);
+
+            card.innerHTML = `
+                <!-- 头部整行作为交互区 -->
+                <div class="diary-header" onclick="toggleDiary('${cardId}')">
+                    <div class="diary-title-container">
+                        <span class="toggle-icon">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="6 9 12 15 18 9"></polyline>
+                            </svg>
+                        </span>
+                        <div class="diary-date">${diary.date}</div>
+                    </div>
+                    <div class="diary-actions">
+                        <!-- 这里的事件使用 event.stopPropagation() 防止冒泡触发展开/收起 -->
+                        <button class="delete-btn" onclick="event.stopPropagation(); deleteDiary('${diary.date}')">删除</button>
+                    </div>
+                </div>
+                <!-- 正文包装区 -->
+                <div class="diary-content-wrapper">
+                    <div class="diary-content">
+                        ${htmlContent}
+                    </div>
+                </div>
+            `;
+            diaryList.appendChild(card);
+        });
+    }
+
+    // 发起删除请求
+    window.deleteDiary = function(dateStr) {
+        if (!confirm(`确定要彻底遗忘 ${dateStr} 这一天的日记吗？`)) return;
+        
+        const reqPayload = cryptoHelper.encrypt({ action: "delete", date: dateStr });
+        
+        if (mqttClient && mqttClient.connected) {
+            mqttClient.publish(`astrbot_diary/${channelId}/up`, reqPayload);
+            // 乐观 UI 更新
+            diariesData = diariesData.filter(d => d.date !== dateStr);
+            renderDiaries();
+        } else {
+            alert("连接已断开，无法操作！");
+        }
+    }
+
+    // 初始化连接
+    function initConnection() {
+        if (!channelId || !secretKey) {
+            updateStatus('error', '缺少密钥或频道号，非法访问！');
+            diaryList.innerHTML = `<div class="loading">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 8px; color: #d88b8b;">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                    <line x1="12" y1="9" x2="12" y2="13"></line>
+                    <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                </svg>URL 中缺少 #channel 和 key 验证参数。请从聊天软件中点击生成的链接打开本网页。
+            </div>`;
+            return;
+        }
+
+        updateStatus('', '正在链接全球信道...');
+        
+        mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
+
+        mqttClient.on('connect', () => {
+            updateStatus('connected', '信道链接安全');
+            
+            mqttClient.subscribe(`astrbot_diary/${channelId}/down`, (err) => {
+                if (!err) {
+                    const readyPayload = cryptoHelper.encrypt({ action: "ready" });
+                    mqttClient.publish(`astrbot_diary/${channelId}/up`, readyPayload);
+                }
+            });
+        });
+
+        mqttClient.on('message', (topic, message) => {
+            if (topic === `astrbot_diary/${channelId}/down`) {
+                const payload = cryptoHelper.decrypt(message.toString());
+                if (payload && payload.action === "sync") {
+                    diariesData = payload.data; 
+                    renderDiaries();
+                } else if (payload && payload.action === "alert") {
+                    alert(payload.msg);
+                }
+            }
+        });
+
+        mqttClient.on('error', (err) => {
+            updateStatus('error', '连接断开');
+            console.error('MQTT Error: ', err);
+        });
+    }
+
+    document.getElementById('refreshBtn').addEventListener('click', () => {
+        if (mqttClient && mqttClient.connected) {
+            diaryList.innerHTML = `<div class="loading">正在重新获取日记...</div>`;
+            const reqPayload = cryptoHelper.encrypt({ action: "ready" });
+            mqttClient.publish(`astrbot_diary/${channelId}/up`, reqPayload);
+        }
+    });
+
+    window.addEventListener('load', initConnection);
+</script>
+
+</body>
+</html>
